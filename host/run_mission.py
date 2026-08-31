@@ -39,11 +39,13 @@ VEHICLE_LINK_PROTOCOL.md 참고.
 from __future__ import annotations
 
 import argparse
+import queue
 import signal
 import sys
 import threading
 import time
 from pathlib import Path
+from typing import Optional
 
 import cv2
 
@@ -55,15 +57,28 @@ import config as cfg
 from localizer import Camera, RobotLocalizer, detect, make_detector
 
 import geti_detector
+import mission_config as mcfg
 import mission_log
 import piece_map
 import window_layout
 from live_map import LiveMap
-from mission import MissionFSM, State
+from mission import MissionFSM, State, visible_labels
 from run_localize import draw, open_cams
 from vehicle_link import ConsoleVehicleLink, MissionCommand, UdpVehicleLink
 
+try:
+    from instruction_resolver import InstructionResolver
+except ImportError as _exc:
+    InstructionResolver = None
+    _instruction_resolver_import_error = _exc
+
 _stop = False
+
+# --manual 모드의 터미널 입력에서 받은 자연어 지시 텍스트를 메인 루프로
+# 넘기는 큐. 지시는 --manual 에서만 받는다 — 기본(자동) 모드의 Enter 는
+# "실차 예행연습용" 즉시정지 안전장치라 그 의미를 바꾸지 않는다
+# (§ Enter 로 즉시 정지, 아래 주석 참고).
+_instruction_queue: "queue.Queue[str]" = queue.Queue()
 
 
 def _on_sigint(signum, frame):
@@ -164,6 +179,20 @@ def main() -> int:
         for cam in cams:
             cv2.namedWindow(cam.name, cv2.WINDOW_NORMAL)
 
+    # 자연어 지시(--manual 터미널에서 타이핑) 해석용 — 키가 없거나 anthropic
+    # 패키지가 안 깔려 있어도 나머지 미션 전체는 그대로 돌아가야 하므로,
+    # 여기서 막히면 그냥 이 기능만 꺼진다.
+    resolver = None
+    if InstructionResolver is None:
+        print(f"[run_mission] anthropic 패키지 없음(pip install anthropic) — "
+              f"자연어 지시 비활성화: {_instruction_resolver_import_error}")
+    else:
+        try:
+            resolver = InstructionResolver()
+        except Exception as exc:
+            print(f"[run_mission] 자연어 지시 비활성화 — Anthropic 클라이언트 "
+                  f"생성 실패(ANTHROPIC_API_KEY 확인): {exc}")
+
     loc = RobotLocalizer()
     tracker = piece_map.PieceTracker()
     fsm = MissionFSM(manual_mode=args.step or args.manual)
@@ -225,7 +254,8 @@ def main() -> int:
                     return
                 if line == "":
                     return                      # EOF 는 입력이 아니다
-                key = line.strip().lower()
+                text = line.strip()
+                key = text.lower()
                 if key in ("q", "quit", "exit"):
                     _stop = True
                     print("\n[STOP] q — 정지하고 종료합니다", flush=True)
@@ -234,10 +264,20 @@ def main() -> int:
                     fsm.request_back()
                     print("\n[수동] 한 단계 되돌립니다", flush=True)
                     continue
-                fsm.request_advance()
+                if not text:
+                    fsm.request_advance()
+                    continue
+                # b/q 도 아니고 빈 줄도 아닌 텍스트는 자연어 지시로 본다
+                # ("퀸 가져와" 등) — instruction_resolver.py 가 있을 때만.
+                if resolver is not None:
+                    _instruction_queue.put(text)
+                    print(f"\n[지시] 접수: {text!r}\n", flush=True)
+                else:
+                    print(f"\n[주의] 자연어 지시 기능이 꺼져 있어 무시합니다: "
+                          f"{text!r} (Enter=다음 단계, b=되돌리기, q=정지)\n", flush=True)
         threading.Thread(target=_manual_watch, daemon=True).start()
-        print("\n>>> 수동 모드 — Enter: 다음 단계 / b: 되돌리기 / q: 정지 <<<\n",
-              flush=True)
+        print("\n>>> 수동 모드 — Enter: 다음 단계 / b: 되돌리기 / q: 정지 / "
+              "그 외 텍스트: 자연어 지시 <<<\n", flush=True)
     elif args.manual:
         print("\n[주의] stdin 이 터미널이 아니라 수동 진행을 못 겁니다\n",
               flush=True)
@@ -274,6 +314,7 @@ def main() -> int:
     frames_seen = 0
     _placed = False
     _last_hz = None
+    _instr_feedback: Optional[str] = None   # LiveMap 상태줄에 보여줄 마지막 지시 처리 결과
     # --- 루프 Hz 측정 (2026-08-28 HANDOFF §0-2) ---
     hz_n = 0
     hz_t0 = time.perf_counter()
@@ -312,6 +353,41 @@ def main() -> int:
             _t_fsm = time.perf_counter(); hz_acc["fsm"] += _t_fsm - _t_geti
             frames_seen += 1
 
+            # --- 자연어 지시 처리 (--manual 터미널 입력, 2026-08-31) ---
+            # 제출(submit)은 이 사이클의 pmap 으로 "지금 보이는 라벨"을 같이
+            # 넘겨야 하므로 여기(메인 루프)에서 한다 — 백그라운드 스레드는
+            # 텍스트를 큐에 넣기만 한다. API 호출 자체는 InstructionResolver
+            # 안에서 별도 스레드로 돌아 이 루프를 막지 않는다.
+            if resolver is not None:
+                if not resolver.busy:
+                    try:
+                        pending = _instruction_queue.get_nowait()
+                    except queue.Empty:
+                        pending = None
+                    if pending is not None:
+                        labels = visible_labels(pmap)
+                        if not labels:
+                            _instr_feedback = "지금 화면에 보이는 기물이 없어요"
+                            print(f"[지시] {_instr_feedback}", flush=True)
+                        else:
+                            resolver.submit(pending, labels)
+                            _instr_feedback = f"해석 중... ({pending!r})"
+                result = resolver.poll_result()
+                if result is not None:
+                    if result.error:
+                        _instr_feedback = f"API 오류: {result.error}"
+                        print(f"[지시] {_instr_feedback}", flush=True)
+                    elif not result.matched:
+                        _instr_feedback = f"이해 못함 — {result.reasoning}"
+                        print(f"[지시] {_instr_feedback}", flush=True)
+                    else:
+                        dest_xy = mcfg.DELIVER_HERE_XY if result.intent == "fetch" else None
+                        applied_now = fsm.set_instruction(result.target_label, dest_xy=dest_xy)
+                        where = "저한테" if result.intent == "fetch" else "정해진 상자로"
+                        when = "바로 갑니다" if applied_now else "지금 것 마치고 갑니다"
+                        _instr_feedback = f"{result.target_label} -> {where}, {when}"
+                        print(f"[지시] {_instr_feedback} ({result.reasoning})", flush=True)
+
             # 사이클마다 넘긴다 — 무엇이 사건인지는 logger 가 판단한다.
             logger.record(
                 state=fsm.state.name, pose=pose, cmd=fsm.last_cmd,
@@ -328,7 +404,8 @@ def main() -> int:
                                  corner=fsm.nav_corner, path=fsm.nav_path,
                                  state_name=fsm.state.name, target_label=fsm.target_label,
                                  ready=(fsm.ready_to_advance if pose.ok else None),
-                                 manual_mode=fsm.manual_mode, cmd=fsm.last_cmd)
+                                 manual_mode=fsm.manual_mode, cmd=fsm.last_cmd,
+                                 instruction_feedback=_instr_feedback)
                 if live_map.closed():
                     break
             hz_acc["view"] += time.perf_counter() - _t_fsm

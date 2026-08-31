@@ -376,7 +376,8 @@ class LiveMap:
                target_label: Optional[str] = None,
                ready: Optional[bool] = None,
                manual_mode: bool = False,
-               cmd: Optional[str] = None) -> None:
+               cmd: Optional[str] = None,
+               instruction_feedback: Optional[str] = None) -> None:
         """매 사이클 한 번씩 부른다. 논블로킹.
 
         goal/nav 는 mission.MissionFSM 이 이번 사이클에 계산한 "지금 이동
@@ -405,6 +406,13 @@ class LiveMap:
         cmd 는 이번 사이클에 실제로 차량에 보낸 신호("go"/"stop"/"yaw+"/
         "yaw-", fsm.last_cmd) — vehicle_link.MissionCommand.cmd 와 정확히
         같은 값이라, 화면에서 보는 것과 실제로 전송되는 것이 항상 일치한다.
+
+        instruction_feedback 은 자연어 지시(--manual 터미널 입력,
+        instruction_resolver.py)의 마지막 처리 결과 한 줄이다(run_mission.py
+        의 _instr_feedback) — 새 위젯을 안 만들고 이미 매 사이클 다시 그리는
+        _status_text 에 얹는다. 이 창은 렌더 비용이 곧 로봇 명령 주기라
+        (위 "왜 블리팅을 쓰는가" 참고) 새 아티스트를 추가하지 않는 쪽을
+        택했다.
         """
         self._frame += 1
 
@@ -511,6 +519,8 @@ class LiveMap:
             lines.append(step_line)
         lines.append("pieces: " + (
             ", ".join(f"{k}:{len(v)}" for k, v in pmap.items()) if pmap else "(none)"))
+        if instruction_feedback:
+            lines.append(f"지시: {instruction_feedback}")
         self._status_text.set_text("\n".join(lines))
 
         if self._use_blit:

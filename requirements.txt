@@ -21,5 +21,10 @@ opencv-python==4.14.0.94
 numpy==2.3.5
 matplotlib==3.11.1
 
+# 자연어 지시 해석(instruction_resolver.py, --manual 전용, 2026-08-31) —
+# 없어도 나머지 미션은 그대로 돈다(run_mission.py 가 ImportError 를 잡아
+# 그 기능만 끈다). ANTHROPIC_API_KEY 환경변수 필요.
+anthropic
+
 # 시험용 (tests/)
 pytest==8.4.2

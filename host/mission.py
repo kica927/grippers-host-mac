@@ -97,6 +97,38 @@ def _nearest_piece(piece_map: PieceMap, robot_xy: XY,
     return best
 
 
+def _nearest_of_label(piece_map: PieceMap, robot_xy: XY, label: str,
+                      skip: Optional[list[XY]] = None) -> Optional[XY]:
+    """`_nearest_piece` 와 같은 작업영역 필터·skip 규칙으로, 딱 한 라벨만
+    본다 — 자연어 지시(instruction_resolver.py)로 라벨이 지정됐을 때 쓴다.
+    같은 라벨이 여러 개면(예: 폰 여러 개) 그중 가장 가까운 걸 고른다."""
+    wx0, wx1 = cfg.WORKSPACE_X
+    wy0, wy1 = cfg.WORKSPACE_Y
+    best: Optional[XY] = None
+    best_d = math.inf
+    for p in piece_map.get(label, []):
+        if not (wx0 <= p[0] <= wx1 and wy0 <= p[1] <= wy1):
+            continue
+        if skip and any(math.hypot(p[0] - s[0], p[1] - s[1]) <= mcfg.SKIP_RADIUS_M
+                        for s in skip):
+            continue
+        d = (p[0] - robot_xy[0]) ** 2 + (p[1] - robot_xy[1]) ** 2
+        if d < best_d:
+            best, best_d = p, d
+    return best
+
+
+def visible_labels(piece_map: PieceMap) -> list[str]:
+    """지금 작업 영역 안에 보이는 라벨 목록(중복 없음) — `_nearest_piece` 와
+    같은 작업영역 필터를 쓴다(상자 자리에 이미 놓인 건 안 보이는 것으로
+    친다). instruction_resolver.py 가 "이 중에서만 골라라"의 후보 집합으로
+    쓴다 — 화면에 없는 라벨을 고르지 못하게 매 요청마다 이걸 같이 넘긴다."""
+    wx0, wx1 = cfg.WORKSPACE_X
+    wy0, wy1 = cfg.WORKSPACE_Y
+    return [label for label, pts in piece_map.items()
+            if any(wx0 <= p[0] <= wx1 and wy0 <= p[1] <= wy1 for p in pts)]
+
+
 def _box_front_xy(box_name: str) -> XY:
     """상자 "중심"이 아니라 상자 앞(작업영역 쪽)에서 멈출 좌표.
 
@@ -162,6 +194,46 @@ class MissionFSM:
         않는다(지금은 차량 없이 시험하는 용도)."""
         self._back_requested = True
 
+    def set_instruction(self, target_label: str, dest_xy: Optional[XY] = None) -> bool:
+        """자연어 지시(instruction_resolver.py 가 Claude 로 해석한 라벨 +
+        intent)를 처리 대상으로 삼는다.
+
+        dest_xy 를 주면(지시가 "fetch" 의도일 때, 예: "퀸 가져와") 그
+        좌표로 옮긴다 — run_mission.py 가 intent 판단에 따라
+        mission_config.DELIVER_HERE_XY 를 넘겨준다. 안 주면(기본값,
+        "organize" 의도나 라벨만 말한 경우) 기존처럼 PIECE_DEST_BOX 로
+        정해지는 상자로 옮긴다.
+
+        손이 비어있으면(아직 안 집었으면, SEARCH_TARGET/APPROACH_PIECE)
+        그 즉시 지금 하던 걸 버리고 이 라벨로 전환한다. APPROACH_PIECE
+        중이면 지금 쫓던 기물을 버리지만 `skipped` 에는 안 남긴다 —
+        _skip_target 과 달리 "못 집어서"가 아니라 "사용자가 다른 걸
+        원해서"라 나중에 다시 후보가 될 수 있어야 한다. 이미 뭔가 집어서
+        옮기는 중(GRASP 이후)이면 무리해서 끼어들지 않고, 지금 들고 있는
+        걸 상자에 넣는 것까지 마친 뒤(PLACE 완료 -> SEARCH_TARGET 복귀
+        시점에) 자동으로 적용되도록 큐에 쌓아둔다 — 들고 있던 걸 그냥
+        놓아버리는 안전하지 않은 동작을 피하기 위함.
+
+        반환값: 손이 비어서 즉시 반영됐으면 True, 지금 하던 일을 마치고
+        나중에 적용되도록 큐에 쌓였으면 False (run_mission.py 가 이 값으로
+        피드백 문구를 다르게 보여준다)."""
+        if self.state in (State.SEARCH_TARGET, State.APPROACH_PIECE):
+            self._instructed_label = target_label
+            self._instructed_dest_xy = dest_xy
+            if self.state == State.APPROACH_PIECE:
+                self.state = State.SEARCH_TARGET
+                self.target_label = None
+                self._target_xy = None
+                self.dest_xy = None
+                self.ready_to_advance = False
+                self.last_cmd = None
+                self._path_planner.reset()
+                self._drive.reset()
+            return True
+        self._queued_instruction_label = target_label
+        self._queued_instruction_dest_xy = dest_xy
+        return False
+
     def _go_back(self) -> None:
         prev = {
             State.APPROACH_PIECE: State.SEARCH_TARGET,
@@ -178,6 +250,8 @@ class MissionFSM:
             self.target_label = None
             self._target_xy = None
             self.dest_xy = None
+            self._instructed_label = None   # 뒤로가기는 사용자 개입이라 지시도 같이 취소
+            self._instructed_dest_xy = None
         self._path_planner.reset()
         self._drive.reset()
         self.nav_goal = None
@@ -248,6 +322,14 @@ class MissionFSM:
         self._align_tries = 0
         # 재정렬을 다 쓰고도 못 집은 기물 좌표. SEARCH_TARGET 후보에서 뺀다.
         self.skipped: list[XY] = []
+
+        # 자연어 지시(instruction_resolver.py) 오버라이드. _instructed_*
+        # 는 지금 바로 쫓을 라벨/목적지, _queued_instruction_* 는 지금
+        # 들고 있는 걸 다 마친 뒤 적용할 것 — set_instruction() 참고.
+        self._instructed_label: Optional[str] = None
+        self._instructed_dest_xy: Optional[XY] = None
+        self._queued_instruction_label: Optional[str] = None
+        self._queued_instruction_dest_xy: Optional[XY] = None
 
         self._path_planner.reset()
         self._drive.reset()
@@ -377,7 +459,14 @@ class MissionFSM:
             self.nav_path = None
             self.last_nav = None
             self.last_cmd = None
-            found = _nearest_piece(piece_map, robot_xy, self.skipped)
+            # 자연어 지시로 라벨이 지정돼 있으면 그 라벨만 본다 — 안 그러면
+            # (기본) 라벨 무관하게 가장 가까운 걸 고른다.
+            if self._instructed_label is not None:
+                xy = _nearest_of_label(piece_map, robot_xy, self._instructed_label,
+                                       self.skipped)
+                found = (self._instructed_label, xy) if xy is not None else None
+            else:
+                found = _nearest_piece(piece_map, robot_xy, self.skipped)
             self.ready_to_advance = found is not None
             if found is not None and self._should_advance():
                 label, xy = found
@@ -387,7 +476,10 @@ class MissionFSM:
                     self.ready_to_advance = False
                 else:
                     self.target_label, self._target_xy = label, xy
-                    self.dest_xy = _box_front_xy(dest_box)
+                    self.dest_xy = (self._instructed_dest_xy if self._instructed_dest_xy
+                                    is not None else _box_front_xy(dest_box))
+                    self._instructed_label = None
+                    self._instructed_dest_xy = None
                     # 재정렬 예산은 **대상 1개** 스코프다. 미션 누적으로 두면
                     # 첫 기물이 예산을 다 쓴 뒤 나머지가 전부 첫 시도에서
                     # 보류된다. 되돌리는 자리는 대상이 바뀌는 여기 하나뿐이다.
@@ -633,6 +725,13 @@ class MissionFSM:
                 self.target_label = None
                 self._target_xy = None
                 self.dest_xy = None
+                # 옮기는 도중 들어온 자연어 지시가 있으면 지금 적용한다 —
+                # set_instruction() 이 손이 안 비어 있어 큐에 쌓아 뒀던 것.
+                if self._queued_instruction_label is not None:
+                    self._instructed_label = self._queued_instruction_label
+                    self._instructed_dest_xy = self._queued_instruction_dest_xy
+                    self._queued_instruction_label = None
+                    self._queued_instruction_dest_xy = None
                 self.state = State.SEARCH_TARGET
 
         return self.state
