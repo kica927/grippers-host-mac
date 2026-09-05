@@ -6,8 +6,11 @@
 정지할지 사람에게 묻는다"는 시연용으로 들어왔다가, 2026-09-04 밤 실기에서
 번거롭다는 이유로 통째로 빠졌다. State.AWAIT_CONTINUE/AWAIT_COMMAND/IDLE 과
 MissionFSM.on_continue()/on_stop()/submit_next_command() 도 코드에서 같이
-지웠으므로, 이 파일은 그 기능이 정말 없어졌는지(그룹이 소진돼도 예외 없이
-RETURN_HOME으로 간다)만 확인한다."""
+지웠으므로, 이 파일은 그 기능이 정말 없어졌는지 확인한다 — "그룹이 소진되면
+AWAIT_CONTINUE로 묻는다"는 없고, 그룹이 소진됐으면(더 찾을 기물이 없으면)
+RETURN_HOME으로, 아직 남아 있으면(2026-09-06부터) 곧장 SEARCH_TARGET으로
+간다(tests/test_place_returns_home.py 참고) — 어느 쪽이든 AWAIT_CONTINUE는
+거치지 않는다."""
 
 from __future__ import annotations
 
@@ -59,11 +62,16 @@ def test_그룹이_소진돼도_묻지_않고_곧장_RETURN_HOME으로_간다():
     _run_until(fsm, sim, {}, {State.RETURN_HOME})
 
 
-def test_같은_그룹이_남아있어도_RETURN_HOME으로_간다():
+def test_같은_그룹이_남아있으면_AWAIT_CONTINUE_없이_곧장_SEARCH_TARGET으로_간다():
+    """이 테스트가 확인하려는 것은 "AWAIT_CONTINUE로 안 간다"이지 "반드시
+    RETURN_HOME으로 간다"가 아니다 — 2026-09-06 사용자 지시로 그 후자가
+    바뀌어, 화면에 같은 그룹(knight)이 남아 있으면 이제 RETURN_HOME을
+    거치지 않고 곧장 SEARCH_TARGET으로 간다(tests/test_place_returns_home.py
+    참고). 어느 쪽이든 AWAIT_CONTINUE는 여전히 없다."""
     sim = PiSim()
     fsm = MissionFSM()
     assert fsm.begin_carrying("rook")
-    _run_until(fsm, sim, {"knight": [(0.9, 0.9)]}, {State.RETURN_HOME})
+    _run_until(fsm, sim, {"knight": [(0.9, 0.9)]}, {State.SEARCH_TARGET})
 
 
 def test_RETURN_HOME은_기본_위치에_도착하면_곧장_SEARCH_TARGET으로_간다():

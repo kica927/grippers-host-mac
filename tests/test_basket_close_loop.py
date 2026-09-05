@@ -81,20 +81,23 @@ def _run(sim: PiSim, max_steps: int = MAX_STEPS) -> tuple[MissionFSM, int]:
 def _run_to_place_done(sim: PiSim, max_steps: int = MAX_STEPS) -> tuple[MissionFSM, int]:
     """룩을 든 상태로 시작해 PLACE 가 **막 끝나는 그 순간**까지 돌린다.
 
-    2026-09-02부터 PLACE 완료는 SEARCH_TARGET이 아니라 RETURN_HOME으로
-    이어진다(시연용, _skip_target과 같은 이유로 항상 같은 자리에서 다음
-    탐색을 시작하게 함). "바구니 앞에 어떻게 섰는가"를 보는 테스트는 그
-    뒤 RETURN_HOME으로 주행해 버린 좌표가 아니라 이 전이 순간의 좌표를
+    2026-09-02~09-06 사이엔 PLACE 완료가 SEARCH_TARGET이 아니라 항상
+    RETURN_HOME으로 이어졌다(시연용). 2026-09-06 사용자 지시로, 이 파일이
+    쓰는 피지도(_OTHER_CHESS_PIECE_REMAINS — knight가 남아 있음)에서는
+    이제 RETURN_HOME을 거치지 않고 곧장 SEARCH_TARGET으로 간다
+    (tests/test_place_returns_home.py 참고) — 그래서 두 상태 중 먼저
+    도달하는 쪽을 완료로 본다. "바구니 앞에 어떻게 섰는가"를 보는
+    테스트는 그 뒤 주행해 버린 좌표가 아니라 이 전이 순간의 좌표를
     봐야 한다 — PLACE에서 NUDGE_BOX로 되돌아가는 보정 왕복(정상 동작)과
-    구분하려고, "직전이 PLACE였고 지금이 RETURN_HOME"인 순간만 완료로
-    본다."""
+    구분하려고, "직전이 PLACE였고 지금이 (RETURN_HOME 또는 SEARCH_TARGET)"
+    인 순간만 완료로 본다."""
     fsm = MissionFSM()
     assert fsm.begin_carrying("rook")
     was_place = False
     for n in range(1, max_steps + 1):
         was_place = fsm.state == State.PLACE
         fsm.step(sim.pose(), _OTHER_CHESS_PIECE_REMAINS, sim)
-        if was_place and fsm.state == State.RETURN_HOME:
+        if was_place and fsm.state in (State.RETURN_HOME, State.SEARCH_TARGET):
             return fsm, n
     pytest.fail(
         f"{max_steps} 사이클 안에 INSERT 를 못 끝냈다 — "

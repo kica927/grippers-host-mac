@@ -292,6 +292,21 @@ class MissionFSM:
         self._queued_instruction_dest_xy = dest_xy
         return False
 
+    def _apply_queued_instruction(self) -> None:
+        """대기 중인 사용자 지시(_queued_instruction_label)가 있으면 지금
+        적용한다(2026-09-06) — RETURN_HOME 완료 시점과, PLACE(INSERT)
+        완료 후 남은 기물이 있어 곧장 SEARCH_TARGET으로 넘어가는 시점,
+        이렇게 두 곳에서 공통으로 쓴다. 예전엔 RETURN_HOME 완료 시점
+        하나에만 인라인으로 있었는데, "완료 후 항상 RETURN_HOME"이
+        "남은 게 있으면 곧장 SEARCH_TARGET"으로 바뀌면서 적용 지점이
+        둘로 늘었다 — 인라인을 두 곳에 복사하면 한쪽만 고쳐질 위험이
+        있어 여기 하나로 묶는다."""
+        if self._queued_instruction_label is not None:
+            self._instructed_label = self._queued_instruction_label
+            self._instructed_dest_xy = self._queued_instruction_dest_xy
+            self._queued_instruction_label = None
+            self._queued_instruction_dest_xy = None
+
     def request_back(self) -> None:
         """"이전" 버튼 — 한 단계 전 상태로 되돌아간다. ready_to_advance
         조건과 무관하게 항상 즉시 적용된다(자동 모드에서도 동작 — 뒤로가기는
@@ -1711,17 +1726,22 @@ class MissionFSM:
                     # 치지 않는다.
             if self.ready_to_advance and self._should_advance():
                 # 하나 끝났다고 멈추지 않는다 — 다음 기물을 다시 찾는다.
-                # 화면에 기물이 더 없으면 SEARCH_TARGET 에서 계속 대기한다.
+                # 화면에 기물이 더 없으면 RETURN_HOME 으로 가서 대기한다.
                 #
-                # 2026-09-02, 시연용으로 SEARCH_TARGET 에 곧장 가지 않고
-                # RETURN_HOME 을 거친다 — _skip_target 과 같은 이유다.
-                # 바구니 바로 앞은 매번 각도·거리가 다른 자리라, 거기서 바로
-                # 다음 스캔을 시작하면 그때그때 다른 자리에서 SEARCH_TARGET
-                # 이 시작된다. RETURN_HOME 을 한 번 거치면 매 라운드가 항상
-                # 같은 자리에서 시작해 시연이 예측 가능해진다. 큐에 쌓인
-                # 지시(_queued_instruction_label)는 여기서 바로 적용하지
-                # 않는다 — RETURN_HOME 완료 시점에 적용하는 기존 경로(아래)
-                # 하나로 합친다.
+                # 2026-09-06 사용자 지시로 되돌림: 2026-09-02~09-06 사이엔
+                # 여기서 항상 RETURN_HOME 을 거쳤다(시연용 — 바구니 바로
+                # 앞은 매번 각도·거리가 달라, 거기서 곧장 SEARCH_TARGET을
+                # 시작하면 매 라운드가 다른 자리에서 시작됐다. RETURN_HOME
+                # 을 한 번 거치면 시연이 예측 가능해진다는 이유였다). 그런데
+                # 실기로 보니 그 왕복 자체가 기물마다 불필요한 이동을
+                # 늘렸다 — 원래(그 이전) 설계대로, 화면에 아직 찾을
+                # 기물이 남아 있거나 대기 중인 사용자 지시가 있으면 그
+                # 자리에서 곧장 SEARCH_TARGET 으로 넘어가고, 더 찾을 게
+                # 없을 때만 RETURN_HOME 을 거쳐 대기한다.
+                #
+                # _skip_target(포기한 자리에 남지 않으려고 RETURN_HOME을
+                # 거치는 것)은 이유가 다르므로 그대로 둔다 — 이 분기는
+                # PLACE(INSERT) 성공 직후에만 해당한다.
                 #
                 # ⚠️ 2026-09-02~09-04 사이 여기서 그룹(chess/toy) 소진 여부로
                 # AWAIT_CONTINUE(사용자에게 "계속할까요?" 묻기)로 갈지 갈랐던
@@ -1729,14 +1749,26 @@ class MissionFSM:
                 # 원래 RETURN_HOME 있던 버전으로 내놔")로 그 기능 전체를
                 # 없앴다. State.AWAIT_CONTINUE/AWAIT_COMMAND/IDLE과
                 # on_continue()/on_stop()/submit_next_command()도 함께
-                # 지웠다 — 이제 무조건 RETURN_HOME 이다.
+                # 지웠다. 이번 되돌림은 그 삭제와 무관하다 — AWAIT을
+                # 되살리는 게 아니라, "완료 후 항상 RETURN_HOME"만
+                # "남은 게 있으면 곧장 SEARCH_TARGET"으로 되돌리는 것이다.
+                if self._instructed_label is not None:
+                    _next_target = _find_label(
+                        piece_map, self._instructed_label, robot_xy, self.skipped)
+                else:
+                    _next_target = _nearest_piece(
+                        piece_map, robot_xy, self.skipped, category=self.category)
                 self.ready_to_advance = False
                 self.target_label = None
                 self._target_xy = None
                 self.dest_xy = None
                 self._path_planner.reset()
                 self._drive.reset()
-                self.state = State.RETURN_HOME
+                if _next_target is not None or self._queued_instruction_label is not None:
+                    self._apply_queued_instruction()
+                    self.state = State.SEARCH_TARGET
+                else:
+                    self.state = State.RETURN_HOME
 
         elif self.state == State.RETURN_HOME:
             # 기물을 포기한 뒤(_skip_target) 실패한 자리에 그대로 남지 않고
@@ -1755,15 +1787,15 @@ class MissionFSM:
                 self.ready_to_advance = False
                 self._path_planner.reset()   # 새 구간 시작
                 self._drive.reset()
-                # PLACE 완료 경로와 같은 이유로 여기서도 큐를 비운다 —
-                # 포기한 기물을 쫓는 동안 새 지시가 들어왔을 수 있다
+                # 여기서도 큐를 비운다 — 포기한 기물을 쫓는 동안(또는
+                # 2026-09-06부터는 화면에 더 찾을 기물이 없어 RETURN_HOME
+                # 으로 대기하러 오는 동안) 새 지시가 들어왔을 수 있다
                 # (set_instruction() 이 GRASP/GRASP_ALIGN 도 "손이 안
-                # 비었다"로 보고 큐에 쌓아 두므로, 2026-09-01).
-                if self._queued_instruction_label is not None:
-                    self._instructed_label = self._queued_instruction_label
-                    self._instructed_dest_xy = self._queued_instruction_dest_xy
-                    self._queued_instruction_label = None
-                    self._queued_instruction_dest_xy = None
+                # 비었다"로 보고 큐에 쌓아 두므로, 2026-09-01). PLACE 완료
+                # 후 곧장 SEARCH_TARGET 으로 넘어가는 경로(위)도 같은
+                # 이유로 _apply_queued_instruction() 을 쓴다 — 두 곳이
+                # 갈라지면 한쪽만 고쳐질 위험이 있다.
+                self._apply_queued_instruction()
                 self.state = State.SEARCH_TARGET
 
         return self.state
