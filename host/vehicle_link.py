@@ -128,6 +128,14 @@ _STATE_TO_PI = {
     "FACE_BOX":       MissionState.CARRY,
     "NUDGE_BOX":      MissionState.APPROACH_BOX,
     "PLACE":          MissionState.INSERT,
+    # "가져와"(사람에게 직접 전달, dest_box_name=None) 전용, 2026-09-06.
+    # 바구니가 없어 라이다 정렬·INSERT 게이트가 애초에 성립하지 않는
+    # 경로라, Pi 쪽에 이미 있는 DEBUG_FORCE_INSERT 우회(원래
+    # grasp_test_console.py 등 수동 시험용, domain/task/baseline_mission.py
+    # BaselineCarryState.execute() 참고)를 재사용한다 — check_insert의
+    # 라이다 게이트를 건너뛰고 곧장 BaselineInsertState(그리퍼 열어 투하)로
+    # 넘어간다. Pi 저장소에 새 상태를 추가하지 않는다.
+    "FETCH_DROP":     MissionState.DEBUG_FORCE_INSERT,
     "DONE":           MissionState.DONE,
     # 2026-09-02 실기 사고로 발견: GRASP_FORCE(2026-08-31 도입, mission.py의
     # _forcing_grasp)가 이 표에 빠져 있었다. encode()의 "모르는 상태는 IDLE+

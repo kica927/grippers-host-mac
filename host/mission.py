@@ -54,6 +54,7 @@ class State(Enum):
     FACE_BOX = auto()          # 상자 접근 부채꼴 진입 후 목표중심 방향(동적, 2026-09-05)으로 제자리 회전
     NUDGE_BOX = auto()         # 그 방향으로 BOX_NUDGE_M 만큼만 더 전진하고 정지
     PLACE = auto()             # 차량이 SmolVLA 로 내려놓는 동안 대기
+    FETCH_DROP = auto()        # "가져와"(사람에게 직접) 전용 — 상자 없이 도착 즉시 무조건 투하 (2026-09-06)
     RETURN_HOME = auto()       # 기물을 포기했거나 하나를 다 옮긴 뒤 mcfg.DEFAULT_HOME_XY 로 복귀 중
     DONE = auto()
 
@@ -310,6 +311,7 @@ class MissionFSM:
             State.FACE_BOX: State.CARRY_TO_DEST,
             State.NUDGE_BOX: State.FACE_BOX,
             State.PLACE: State.NUDGE_BOX,
+            State.FETCH_DROP: State.CARRY_TO_DEST,
         }.get(self.state)
         if prev is None:
             return   # SEARCH_TARGET 은 맨 앞이라 더 되돌아갈 데가 없다
@@ -1182,13 +1184,58 @@ class MissionFSM:
                     self.state = State.FACE_BOX
             else:
                 # 상자가 아니라 사용자에게 직접 가져다주는 경우("가져와") —
-                # 고정 지점(dest_xy) 도착 판정을 그대로 쓴다. 정렬 목표는
-                # None으로 둬서 FACE_BOX가 mcfg.BOX_FACE_YAW_DEG로 대체하게 한다.
+                # 고정 지점(dest_xy, = mcfg.DELIVER_HERE_XY) 도착 판정을
+                # 그대로 쓴다. FACE_BOX/NUDGE_BOX/PLACE로는 안 보낸다(2026-
+                # 09-06) — 그 셋은 실제 바구니가 있다는 전제로 라이다 정렬·
+                # INSERT 게이트를 돈다. dest_box_name이 None인 이 경로엔
+                # 바구니가 없으니 그 전제가 처음부터 성립하지 않는다 —
+                # FETCH_DROP으로 곧장 가서 정렬 없이 무조건 투하한다
+                # (사용자 지시: "drop 조건은 없이 그냥 떨어뜨리는 걸로").
                 self.ready_to_advance = dist <= mcfg.PLACE_TRIGGER_DIST_M
                 if self.ready_to_advance and self._should_advance():
-                    self._face_target_yaw_deg = None
                     self.ready_to_advance = False
-                    self.state = State.FACE_BOX
+                    self.state = State.FETCH_DROP
+
+        elif self.state == State.FETCH_DROP:
+            # "가져와" 전용(2026-09-06) — 바구니 정렬 없이 곧장 무조건
+            # 투하한다. Pi 쪽에 새 상태를 추가하지 않고, 이미 있는
+            # DEBUG_FORCE_INSERT 우회로(원래 grasp_test_console.py 등
+            # 수동 시험용 — domain/task/baseline_mission.py의
+            # BaselineCarryState.execute() 참고)를 그대로 재사용한다.
+            # command.state가 DEBUG_FORCE_INSERT면 check_insert의 라이다
+            # 게이트를 완전히 건너뛰고 그 사이클에 바로 BaselineInsertState
+            # (그리퍼를 열어 투하하고 idle로 접는다)로 넘어간다 — PLACE가
+            # 쓰는 정식 INSERT 경로와 마지막 물리 동작 자체는 동일하고,
+            # "정렬이 됐는가"만 안 본다. Pi 저장소는 건드리지 않는다
+            # ("이제 로컬 맥북에서만 작업해" — 이번 세션 사용자 지시와도
+            # 맞다).
+            #
+            # yaw_correction_deg(safe_300)도 안 보낸다 — 그건 "정렬은
+            # 됐는데 잔차만 팔로 흡수"하는 보정이라, 애초에 정렬을 안 보는
+            # 여기 취지와 안 맞는다.
+            self.nav_goal = None
+            self.nav_corner = None
+            self.nav_path = None
+            self.last_nav = None
+            self.last_cmd = "stop"
+            link.send(MissionCommand("stop", "FETCH_DROP", pose.x, pose.y, pose.yaw_deg))
+            status = link.poll_status() if not self.ready_to_advance else "IDLE"
+            if status in ("PLACE_DONE", "FAILED"):
+                # FAILED(투하 부하 판정 실패)도 그냥 완료로 본다 — PLACE의
+                # 같은 분기(1625행 근방)와 같은 이유다: BaselineInsertState는
+                # 판정 결과와 무관하게 이미 그리퍼를 열었고, 그 판정 자체가
+                # 오탐일 수 있는 부하 문턱 비교라 여기서 다시 시도할 방법이
+                # 없다.
+                self.ready_to_advance = True
+            if self.ready_to_advance and self._should_advance():
+                self.ready_to_advance = False
+                self.target_label = None
+                self._target_xy = None
+                self.dest_xy = None
+                self.dest_box_name = None
+                self._path_planner.reset()
+                self._drive.reset()
+                self.state = State.RETURN_HOME
 
         elif self.state == State.FACE_BOX:
             # 상자 앞엔 도착했지만 아직 방향이 안 맞을 수 있다(어느 축으로
