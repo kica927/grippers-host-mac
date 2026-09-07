@@ -799,9 +799,12 @@ class UdpVehicleLink(VehicleLink):
             return "BUSY"
 
         if report == Report.REJECTED:
-            # Pi 가 명령 자체를 실행할 수 없다고 되돌려줬다. 링크 문제가
-            # 아니라 **Host 인코더 버그** 신호다 — 조용히 넘기면 안 된다.
-            self._warn(f"⚠️ Pi 가 명령을 거부했다: [{state}] {detail}")
+            # Pi 가 명령 자체를 실행할 수 없다고 되돌려줬다. GRASP/PLACE 중엔
+            # Host 가 의도적으로 명령을 안 보내고 기다리기만 하므로(§ 위
+            # docstring), 그 구간에서는 이 보고가 정상적으로 반복된다 —
+            # detail 에 사이클 수가 매번 바뀌어 실려 있어 _warn 의 문구별
+            # 5초 제한이 사실상 안 먹혀 매 사이클 출력되던 것을 2026-09-08
+            # 사용자 지시로 껐다. 로그 자체(mission_log)에는 계속 남는다.
             return "BUSY"
 
         if report == Report.GRASP_READY or report == Report.INSERT_READY:

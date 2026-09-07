@@ -23,12 +23,11 @@ PIECE_DEST_BOX: 체스말은 chess 상자, 나머지는 toy 상자)로 나른다
 끝나면 멈추지 않고 다음 기물을 또 찾는다 — 화면(작업 영역)에 기물이 하나도
 안 남을 때까지 반복.
 
-실행 중 터미널에 문장을 치면(예: "퀸 가져와", "룩 정리해") 그 한 번은 이
-"최근접 우선" 규칙을 덮어쓴다(instruction_resolver.py, Claude API로 해석 —
-ANTHROPIC_API_KEY 환경변수 필요, 없으면 이 기능만 조용히 꺼진다). "가져와"
-류는 사용자 앞(mission_config.DELIVER_HERE_XY)으로, "정리해"류나 라벨만
-말한 경우는 평소처럼 라벨별 상자로 나른다. --manual 모드에서는 stdin 을
-이미 단계 진행에 쓰고 있어서 이 입력을 안 받는다.
+실행 중 터미널에서 받는 입력은 빈 줄+Enter(즉시 정지)뿐이다 — 문장으로
+기물을 지시하는 자연어 지시 기능은 제거했다(2026-09-08, 사용자 지시.
+instruction_resolver.py 자체는 남아 있지만 이 스크립트는 더 이상 부르지
+않는다). --manual 모드에서는 stdin 을 이미 단계 진행에 쓰고 있어서 이
+입력을 안 받는다.
 
 사용법
     python run_mission.py
@@ -72,19 +71,9 @@ import pi_lifecycle
 import piece_map
 import window_layout
 from live_map import LiveMap
-from mission import MissionFSM, PieceMap, State, visible_labels
+from mission import MissionFSM, PieceMap, State
 from run_localize import draw, open_cams
 from vehicle_link import ConsoleVehicleLink, MissionCommand, UdpVehicleLink
-
-# instruction_resolver.py 는 anthropic SDK(및 ANTHROPIC_API_KEY)가 있어야
-# 쓸 수 있다 — 없어도 이 스크립트 자체는 죽지 않고 그 기능만 꺼진다
-# (2026-09-01, 팀원의 2026-08-31 handoff 델타 이식).
-try:
-    from instruction_resolver import InstructionResolver
-    _instruction_resolver_import_error = None
-except Exception as _exc:  # noqa: BLE001 -- 미설치·키 없음 등 다양한 원인
-    InstructionResolver = None
-    _instruction_resolver_import_error = _exc
 
 _stop = False
 
@@ -258,14 +247,6 @@ def _run_mission(args) -> int:
     fsm = MissionFSM(manual_mode=args.step or args.manual, category=args.category)
     pmap: PieceMap = {}   # 지시 입력 스레드가 루프 시작 전에 참조할 수 있어 미리 초기화
 
-    resolver = None
-    if InstructionResolver is None:
-        print(f"[지시] 자연어 지시 비활성화: {_instruction_resolver_import_error}")
-    else:
-        try:
-            resolver = InstructionResolver()
-        except Exception as exc:  # noqa: BLE001 -- 키 오류 등 다양한 원인
-            print(f"[지시] 자연어 지시 비활성화(초기화 실패): {exc}")
     if args.vehicle_ip:
         link = UdpVehicleLink(args.vehicle_ip, cmd_port=args.vehicle_cmd_port,
                               status_port=args.vehicle_status_port)
@@ -347,8 +328,7 @@ def _run_mission(args) -> int:
             print("\n>>> 수동 모드 — Enter: 다음 단계 / b: 되돌리기 / q: 정지 <<<\n",
                   flush=True)
         elif not args.no_stop_on_enter:
-            print("\n>>> 빈 줄+Enter: 즉시 정지 / 문장+Enter: 그 기물을 지시"
-                  "(예: '퀸 가져와', '룩 정리해') <<<\n", flush=True)
+            print("\n>>> Enter: 즉시 정지 <<<\n", flush=True)
     else:
         print("\n[주의] stdin 이 터미널이 아니라 Enter 정지·자연어 지시를 "
               "못 겁니다 — --seconds 로 시간 제한을 두세요\n",
@@ -454,40 +434,10 @@ def _run_mission(args) -> int:
                         if line == "":
                             _stop = True
                             print("\n[STOP] Enter — 정지합니다", flush=True)
-                        elif resolver is None:
-                            print(f"\n[지시] 무시함 — 자연어 지시 비활성화"
-                                  f"({_instruction_resolver_import_error or '초기화 실패'})\n",
-                                  flush=True)
-                        elif resolver.busy:
-                            print("\n[지시] 이전 요청을 아직 처리 중입니다 — 잠시 후 다시 시도하세요\n",
-                                  flush=True)
-                        else:
-                            labels = visible_labels(pmap)
-                            if not labels:
-                                print("\n[지시] 지금 화면에 보이는 기물이 없습니다\n", flush=True)
-                            else:
-                                print(f"\n[지시] \"{line}\" 처리 중...\n", flush=True)
-                                resolver.submit(line, labels)
+                        # 빈 줄이 아닌 입력(자연어 지시)은 더 이상 받지 않는다
+                        # (2026-09-08, 사용자 지시로 기능 제거) — 그냥 무시한다.
             except queue.Empty:
                 pass
-
-            # 자연어 지시 결과 — resolver.submit() 은 백그라운드 스레드에서
-            # 돌므로, FSM 을 건드리는 건(set_instruction) 여기 메인 루프
-            # 안에서만 한다(2026-09-01).
-            if resolver is not None:
-                result = resolver.poll_result()
-                if result is not None:
-                    if result.error:
-                        print(f"\n[지시] API 오류: {result.error}\n", flush=True)
-                    elif not result.matched:
-                        print(f"\n[지시] 못 알아들음 — {result.reasoning}\n", flush=True)
-                    else:
-                        dest_xy = mcfg.DELIVER_HERE_XY if result.intent == "fetch" else None
-                        where = "저한테" if result.intent == "fetch" else "정해진 상자로"
-                        applied_now = fsm.set_instruction(result.target_label, dest_xy=dest_xy)
-                        when = "바로 전환" if applied_now else "지금 든 것 마친 뒤 적용"
-                        print(f"\n[지시] '{result.target_label}' 를 {where} "
-                              f"({when}) — {result.reasoning}\n", flush=True)
 
             # 사이클마다 넘긴다 — 무엇이 사건인지는 logger 가 판단한다.
             logger.record(
@@ -617,29 +567,6 @@ def _run_mission(args) -> int:
         if isinstance(link, UdpVehicleLink):
             link.close()
         logger.close()
-
-    # --- 실행 후 코멘트 (2026-09-04) ---
-    #
-    # 위 summary()는 "GRASP_FAILED 1회 · GRASP_DONE 1회"처럼 사건의 종류와
-    # 횟수만 남긴다 — 그게 재시도 끝에 성공한 것인지, 첫 시도가 왜
-    # 실패했는지는 그 자리에 있던 사람만 안다. 그 맥락을 로그 파일에 같이
-    # 묻어 두면 사후 분석 때 요약표만으로는 안 보이는 사정이 드러난다.
-    #
-    # ⚠️ 여기서 input()으로 새로 stdin을 읽으면 안 된다 — 위 _line_reader
-    # 스레드가 데몬이라 종료해도 안 죽고, EOF가 아닌 한 다음 줄을 계속
-    # 기다리고 있다(§ 위 "터미널 입력 한 줄" 주석과 같은 이유로, 같은
-    # stdin을 두 스레드가 동시에 readline()하면 어느 쪽이 줄을 가져갈지
-    # 알 수 없다). 그래서 새로 읽지 않고 그 스레드가 채우는 같은 큐
-    # (_line_q)에서 받는다 — 이 시점엔 메인 루프가 매 사이클 비우던 것도
-    # 끝났으므로 큐는 비어 있고, 다음에 들어오는 한 줄이 곧 이 코멘트다.
-    if (_stdin_ready and _log_path is not None
-            and _line_reader_thread is not None and _line_reader_thread.is_alive()):
-        print("<부연 설명을 입력하세요.>")
-        print("> ", end="", flush=True)
-        note = _line_q.get().strip()
-        if note:
-            mission_log.append_annotation(_log_path, note)
-            print(f"[기록됨] {_log_path}")
 
     print(f"\n\n종료 — 마지막 상태: {fsm.state.name}")
     return 0
