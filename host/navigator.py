@@ -249,10 +249,17 @@ class DriveSequencer:
         self._toggle_count = 0
         self._escape_remaining = 0
 
-    def _enter_rotate(self, yaw_err: float) -> DriveMode:
+    def _enter_rotate(self, yaw_err: float, allow_escape: bool = True) -> DriveMode:
         """ROTATE 로 들어가려는 시점에 부른다. 방향이 바로 전 ROTATE 와
         반대면 토글로 센다(같은 방향이면 0으로 되돌린다) — 다다르면 ROTATE
-        대신 ESCAPE 로 들어가게 한다."""
+        대신 ESCAPE 로 들어가게 한다.
+
+        `allow_escape=False`(2026-09-08, 사용자 지시 — 바구니 진입각 사고
+        후속)면 토글 한계에 닿아도 ESCAPE로 안 넘어가고 카운터만 지운 채
+        ROTATE를 계속 낸다 — 헌팅이 길어질 순 있지만, 정렬을 통째로
+        무시하고 강제 전진하는 것보다는 그 자리에서 계속 다시 맞춰 보는
+        쪽이 상자 앞에서는 안전하다. 호출부(mission.py `_approach()`)가
+        상자 중심까지의 거리로 이 값을 정한다."""
         sign = math.copysign(1.0, yaw_err) if yaw_err != 0.0 else 1.0
         if self._last_rotate_sign is not None and sign != self._last_rotate_sign:
             self._toggle_count += 1
@@ -262,6 +269,8 @@ class DriveSequencer:
         if self._toggle_count >= mcfg.ROTATE_OSCILLATION_TOGGLE_LIMIT:
             self._toggle_count = 0
             self._last_rotate_sign = None
+            if not allow_escape:
+                return DriveMode.ROTATE
             self._escape_remaining = mcfg.ROTATE_OSCILLATION_ESCAPE_CYCLES
             self.escape_count += 1
             return DriveMode.ESCAPE
@@ -274,6 +283,7 @@ class DriveSequencer:
         target_xy: XY,
         obstacles: list[XY],
         avoidance_obstacles: list[XY] = (),
+        allow_escape: bool = True,
         **kwargs,
     ) -> DriveCommand:
         """`avoidance_obstacles`: ESCAPE(정렬 무시 강제 전진) 중 "이 방향
@@ -284,6 +294,10 @@ class DriveSequencer:
         하나만 보고 비켜간다"는 단순한 방식이라, 서로 미는 장애물 두 개
         사이에서 영원히 왕복하는 버그가 있었다(_approach() 정의부 주석
         참고, 그래서 평소 주행은 obstacles=[] 로 그 계산 자체를 안 쓴다).
+
+        `allow_escape=False`(2026-09-08)면 정렬 토글이 한계를 넘어도
+        ESCAPE로 안 넘어간다 — `_enter_rotate()` 참고. 상자 근처에서
+        정렬 무시 강제 전진이 상자를 밀고 들어가는 사고로 이어져 추가했다.
         여기서는 그 우회 계산을 재사용하지 않고 전방 차단 여부만 본다 —
         그 버그를 다시 불러들이지 않는다.
 
@@ -336,7 +350,7 @@ class DriveSequencer:
             # 구간의 첫 사이클 — STOP 전이 신호 없이 바로 알맞은 모드로 시작.
             self._mode = (DriveMode.FORWARD
                           if abs(fresh_yaw_err) <= self.yaw_tolerance_deg
-                          else self._enter_rotate(fresh_yaw_err))
+                          else self._enter_rotate(fresh_yaw_err, allow_escape))
             if self._mode == DriveMode.ROTATE:
                 self._rotate_target_yaw = fresh_target_yaw
             elif self._mode == DriveMode.ESCAPE:
@@ -370,7 +384,7 @@ class DriveSequencer:
             self._mode = self._next_after_stop
             if self._mode == DriveMode.ROTATE:
                 self._rotate_target_yaw = fresh_target_yaw
-                self._mode = self._enter_rotate(yaw_err)
+                self._mode = self._enter_rotate(yaw_err, allow_escape)
                 if self._mode == DriveMode.ESCAPE:
                     self._rotate_target_yaw = None
 

@@ -37,7 +37,7 @@ import mission_config as mcfg               # noqa: E402
 from navigator import DriveMode, DriveSequencer   # noqa: E402
 
 
-def _round_trip(seq: DriveSequencer, robot_xy, flip_yaw: float):
+def _round_trip(seq: DriveSequencer, robot_xy, flip_yaw: float, allow_escape: bool = True):
     """ROTATE가 수렴한 상태에서 시작해, FORWARD -> (flip_yaw로) misalign ->
     다음 ROTATE 진입 시도까지 딱 한 바퀴 진행시키고 그 결과 DriveCommand를
     돌려준다. 호출 전 self._mode 는 STOP(next=FORWARD) 이거나 ROTATE(aligned)
@@ -45,7 +45,7 @@ def _round_trip(seq: DriveSequencer, robot_xy, flip_yaw: float):
     cmd = None
     for i in range(5):
         yaw = 0.0 if i < 2 else flip_yaw
-        cmd = seq.update(robot_xy, yaw, (1.0, 0.0), [])
+        cmd = seq.update(robot_xy, yaw, (1.0, 0.0), [], allow_escape=allow_escape)
     return cmd
 
 
@@ -228,3 +228,43 @@ def test_ESCAPE로_넘어갈_때마다_escape_count가_누적된다():
     assert seq.escape_count == 1
     seq.reset()
     assert seq.escape_count == 1, "reset()이 누적 카운터까지 지워 버렸다"
+
+
+def test_allow_escape가_False면_토글_한계에_닿아도_ESCAPE로_안_간다():
+    """2026-09-08, 사용자 지시 — 바구니 진입각 사고(CARRY_TO_DEST가 상자
+    근처에서 정렬을 무시하고 강제 전진해 상자를 밀고 들어간 실기 사고
+    2건) 후속. mission.py가 상자 중심까지의 거리로 이 값을 정해 넘긴다
+    (basket_target.approach_nav_target 정의부 주석 참고) — 여기서는 그
+    스위치 자체가 실제로 ESCAPE를 막는지만 순수 로직으로 확인한다."""
+    seq = DriveSequencer(yaw_tolerance_deg=5.0)
+    robot_xy = (0.0, 0.0)
+
+    cmd = seq.update(robot_xy, 170.0, (1.0, 0.0), [], allow_escape=False)
+    assert cmd.mode == DriveMode.ROTATE
+
+    flips = [170.0, -170.0] * (mcfg.ROTATE_OSCILLATION_TOGGLE_LIMIT + 3)
+    for flip_yaw in flips:
+        cmd = _round_trip(seq, robot_xy, flip_yaw, allow_escape=False)
+        assert cmd.mode != DriveMode.ESCAPE, (
+            "allow_escape=False인데도 ESCAPE로 넘어갔다 — 토글 한계를 "
+            "넘겨도 계속 ROTATE만 나와야 한다")
+
+    assert seq.escape_count == 0, "allow_escape=False인데 escape_count가 늘었다"
+
+
+def test_allow_escape가_False여도_평소_ESCAPE_동작은_안_바뀐다():
+    """기본값(allow_escape=True, 인자를 안 준 기존 호출부 전부)은 지금까지의
+    ESCAPE 동작이 그대로여야 한다 — 회귀 방지."""
+    seq = DriveSequencer(yaw_tolerance_deg=5.0)
+    robot_xy = (0.0, 0.0)
+
+    cmd = seq.update(robot_xy, 170.0, (1.0, 0.0), [])
+    assert cmd.mode == DriveMode.ROTATE
+    flips = [170.0, -170.0] * mcfg.ROTATE_OSCILLATION_TOGGLE_LIMIT
+    cmd = None
+    for flip_yaw in flips:
+        cmd = _round_trip(seq, robot_xy, flip_yaw)
+        if cmd.mode == DriveMode.ESCAPE:
+            break
+    assert cmd is not None and cmd.mode == DriveMode.ESCAPE
+    assert seq.escape_count == 1

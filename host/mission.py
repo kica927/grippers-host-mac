@@ -527,11 +527,16 @@ class MissionFSM:
 
     def _approach(self, pose: Pose, robot_xy: XY, target_xy: XY,
                   obstacles: list[XY], target_label: Optional[str],
-                  link: VehicleLink) -> float:
+                  link: VehicleLink, allow_escape: bool = True) -> float:
         """target_xy 로 축정렬 경로를 한 사이클 진행시키고, 실제 목표까지의
         (사선) 직선거리를 돌려준다 — GRASP/PLACE 전이 판정은 부분목표가
         아니라 이 값으로 해야 한다(부분목표는 중간 지점일 뿐이라, 그걸로
-        판정하면 아직 한 축 남았는데 도착했다고 착각한다)."""
+        판정하면 아직 한 축 남았는데 도착했다고 착각한다).
+
+        `allow_escape=False`(2026-09-08, 바구니 진입각 사고 후속)면
+        DriveSequencer가 정렬 헌팅을 감지해도 ESCAPE(정렬 무시 강제 전진)
+        대신 계속 ROTATE로 다시 맞춘다 — CARRY_TO_DEST가 상자 근처에서만
+        이렇게 부른다(navigator.DriveSequencer._enter_rotate() 참고)."""
         self.nav_goal = target_xy
 
         # 2026-09-07 저녁 — 낮에 넣었던 "장애물이 차량 반경 안이면 후진"
@@ -595,7 +600,8 @@ class MissionFSM:
         # 재사용하지 않는 이유가 거기 있다.
         escape_count_before = self._drive.escape_count
         nav = self._drive.update(robot_xy, pose.yaw_deg, sub_goal, [],
-                                 avoidance_obstacles=obstacles)
+                                 avoidance_obstacles=obstacles,
+                                 allow_escape=allow_escape)
         if self._drive.escape_count > escape_count_before:
             # 2026-09-05: 사용자가 "yaw 진동으로 시간이 지체된다"고 보고해서
             # 추가한 계측 — DriveSequencer.escape_count 정의부 참고. 값을
@@ -1240,9 +1246,29 @@ class MissionFSM:
             # 났었다. self.dest_xy 필드 자체는 그대로 둔다(다른 코드/테스트가
             # _box_front_xy 값을 그대로 기대한다) — 이번 사이클의 주행
             # 목표만 바꾼다.
-            nav_target = (basket_target.target_center(self.dest_box_name)
+            # 2026-09-08, 사용자 지시 — 두 차례 실기 사고 후속(상자로 접근
+            # 부채꼴 밖에서 들어오면, 목표가 여전히 "중심"이라 상자 옆면에
+            # 닿을 때까지 계속 전진 명령이 나갔다). target_center 그대로
+            # 쫓지 않고, 지금 방위각을 접근 부채꼴 안으로 클램프한
+            # approach_nav_target()을 쫓는다 — basket_target.
+            # approach_nav_target() 정의부 주석 참고. 부채꼴 안에서
+            # 접근 중이면 클램프가 안 걸려 지금과 동작이 같다.
+            nav_target = (basket_target.approach_nav_target(robot_xy, self.dest_box_name)
                           if self.dest_box_name is not None else self.dest_xy)
-            dist = self._approach(pose, robot_xy, nav_target, obstacles, None, link)
+            # 같은 사고 후속 — 상자 중심까지 이 거리(=_box_front_xy가 쓰는
+            # "상자 앞 여유" 오프셋과 같은 식) 안에서는 DriveSequencer의
+            # 정렬-헌팅 ESCAPE(정렬 무시 강제 전진)를 막는다. ESCAPE는
+            # 상자와 무관한 일반 주행(RETURN_HOME 등)에서 헌팅으로 시간을
+            # 허비하지 않으려고 만든 안전판인데, 상자 바로 앞에서 발동하면
+            # 반대로 그 "정렬 무시"가 밀고 들어가는 사고 원인이 된다.
+            allow_escape = True
+            if self.dest_box_name is not None:
+                cx, cy = basket_target.target_center(self.dest_box_name)
+                dist_to_center = math.hypot(robot_xy[0] - cx, robot_xy[1] - cy)
+                near_box = dist_to_center <= (cfg.BOX_L / 2.0 + mcfg.BOX_APPROACH_MARGIN_M)
+                allow_escape = not near_box
+            dist = self._approach(pose, robot_xy, nav_target, obstacles, None, link,
+                                  allow_escape=allow_escape)
             if self.dest_box_name is not None:
                 # 점(dest_xy) 도착이 아니라 목표영역 중심을 기준으로 한
                 # 접근(남쪽) 부채꼴 진입으로 판정한다 —

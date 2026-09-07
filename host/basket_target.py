@@ -380,3 +380,46 @@ def check_approach_sector(
         reason = f"접근 부채꼴 밖 (중심 기준 {bearing:+.1f}deg, 남쪽 ±{half:.0f}deg만 유효)"
 
     return ApproachSectorResult(ok, distance, bearing, align_yaw, (cx, cy), reason)
+
+
+# ---------------------------------------------------------------------------
+# 진입각 제한 주행 목표 (사용자 지시, 2026-09-08 — 두 차례 실기 사고 후속)
+#
+# check_approach_sector()는 "지금 로봇이 부채꼴 안에 들어왔는가"만 판정하고
+# FACE_BOX 전이 여부를 결정할 뿐, CARRY_TO_DEST가 실제로 뒤쫓는 주행
+# 목표(target_center 그 자체)에는 전혀 반영되지 않았다 — 그래서 로봇이
+# 부채꼴 밖(예: 동쪽)에서 접근 중이면 판정은 계속 실패하는데 목표는 여전히
+# "상자 중심"이라 그 방향으로 계속 다가가려 했다. 상자 반폭(BOX_W/2)·
+# 반길이(BOX_L/2)가 SOUTH_APPROACH_SECTOR_RADIUS_M(0.15)보다 커서, 각도가
+# 안 맞으면 목표 중심에 닿기 한참 전에 상자 옆면에 부딪혀 밀고 들어가는
+# 사고로 이어졌다(실기 로그 2회 재현, chess/queen·knight 두 건 모두 CARRY_
+# TO_DEST 도중 접근 부채꼴 밖 방위에서 상자에 닿을 때까지 전진 명령이
+# 계속 나간 패턴과 일치).
+#
+# approach_nav_target()은 목표를 상자 "중심" 대신, 지금 방위각을 접근
+# 부채꼴(±half) 안으로 클램프한 뒤 그 방향으로 반경 SOUTH_APPROACH_SECTOR_
+# RADIUS_M만큼 뗀 점으로 준다. 로봇이 이미 부채꼴 안이면 클램프가 안
+# 걸려 지금과 똑같이 중심을 향해 직진한다(정상 경로는 동작 불변). 부채꼴
+# 밖이면 매 사이클 재계산되는 이 목표점이 부채꼴 경계선 위에 놓여, 로봇이
+# 상자를 관통하지 않고 그 경계선을 따라 자연스럽게 돌아 들어오게 된다.
+def approach_nav_target(
+    robot_xy: tuple[float, float],
+    box_name: str,
+    radius_m: float = SOUTH_APPROACH_SECTOR_RADIUS_M,
+    sector_deg: float = SOUTH_APPROACH_SECTOR_DEG,
+) -> tuple[float, float]:
+    """CARRY_TO_DEST가 뒤쫓을 주행 목표. 상자 중심이 아니라, 로봇의 지금
+    방위각을 접근 부채꼴(남쪽 ±half)로 클램프한 방향으로 `radius_m`만큼
+    뗀 점을 돌려준다 — check_approach_sector()와 반경·부채꼴 폭을 같은
+    상수로 공유해, "이 점에 도착하면 곧 부채꼴 진입 판정도 통과한다"가
+    보장되게 한다."""
+    cx, cy = target_center(box_name)
+    dx, dy = robot_xy[0] - cx, robot_xy[1] - cy
+    if math.hypot(dx, dy) < 1e-6:
+        bearing = _SOUTH_BEARING_DEG
+    else:
+        bearing = math.degrees(math.atan2(dy, dx))
+    half = sector_deg / 2.0
+    rel = max(-half, min(half, _normalize_deg(bearing - _SOUTH_BEARING_DEG)))
+    clamped = math.radians(_SOUTH_BEARING_DEG + rel)
+    return (cx + radius_m * math.cos(clamped), cy + radius_m * math.sin(clamped))
