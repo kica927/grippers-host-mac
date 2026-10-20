@@ -8,6 +8,7 @@ geti-sdk 는 **선택 의존성**이다. `kind: none` 이면 import 하지 않�
 """
 from __future__ import annotations
 
+import sys
 import threading
 import time
 from dataclasses import dataclass
@@ -139,7 +140,7 @@ class GetiDetector:
         if not path.exists():
             raise RuntimeError(
                 f"Geti 배포 폴더가 없습니다: {path}\n"
-                "hardware\\grippers_topview\\geti_sdk-deployment\\deployment 를 이 경로로 복사하세요")
+                "hardware/grippers_topview/geti_sdk-deployment/deployment 를 이 경로로 복사하세요")
         ov_config = {}
         if cfg.cache_dir:
             # iGPU 캐시 없음 30 s -> 캐시 3 s. CPU 에서도 손해가 없어 항상 켠다.
@@ -148,6 +149,10 @@ class GetiDetector:
         self._cfg = cfg
         self._workers: dict[int, _GetiWorker] = {}
         self.device = cfg.device
+        if sys.platform == "darwin" and self.device.upper() != "CPU":
+            # 맥용 OpenVINO 에는 GPU 플러그인이 없다 — 올려 보고 실패하는 대신 처음부터 CPU 로.
+            print(f"[detector] macOS: OpenVINO {self.device} 없음 — CPU 로 돌립니다")
+            self.device = "CPU"
         for idx in cam_indices:
             dep = Deployment.from_folder(str(path))
             try:

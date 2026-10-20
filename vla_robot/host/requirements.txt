@@ -4,7 +4,8 @@
 
 numpy>=1.26
 # cv2.aruco.ArucoDetector 가 필요하다(OpenCV 4.7+). contrib 가 아니어도 4.7+ 면 aruco 포함.
-opencv-contrib-python>=4.8
+# <5: 2026-10 에 5.0 이 나왔다 — 팀 Windows 와 geti-sdk(opencv-python 4.x)에 맞춰 4.x 로 묶는다.
+opencv-contrib-python>=4.8,<5
 pyyaml>=6.0
 pytest>=8.0
 

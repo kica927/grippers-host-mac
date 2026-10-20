@@ -15,6 +15,49 @@ pip install geti-sdk==2.13.1             # 검출기를 쓸 때만
 
 `vla_common` 설치를 건너뛰어도 `host_config.py` 가 경로를 자동으로 얹는다.
 
+## 설치·실행 (macOS, Apple Silicon, Python 3.11)
+
+```zsh
+brew install python@3.11
+cd vla_robot/host
+python3.11 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+pip install geti-sdk==2.13.1
+```
+
+코드는 Windows 와 한 벌이다 — 플랫폼 분기는 아래 네 곳뿐이다.
+
+| 곳 | Windows | macOS |
+|---|---|---|
+| 카메라 백엔드(`localization/cameras.py`) | DSHOW | AVFoundation |
+| 초점 고정 | AUTOFOCUS=0 → FOCUS 값 | **안 된다** — AVFoundation 이 받지 않는다. 경고를 찍는다 |
+| UI 창 높이(`view/web_view.py`) | 작업 영역(작업 표시줄 제외) | 작업 영역(메뉴 막대·Dock 제외, `osascript`). 13인치 맥북 770 pt — 고정 860 이면 아래가 잘린다 |
+| 검출기 장치(`perception/detector.py`) | OpenVINO `GPU.0`(iGPU), 안 되면 CPU | 처음부터 CPU(맥용 OpenVINO 에는 GPU 가 없다). M 시리즈 한 장 약 0.19 s |
+
+처음 한 번 할 일:
+
+1. **권한** — 시스템 설정 > 개인정보 보호 및 보안 > **카메라**·**마이크** 에서 run_host 를 띄우는 앱(터미널 · iTerm ·
+   VS Code)을 켠다. 권한이 없으면 예외 없이 "카메라를 열 수 없습니다"만 나온다(안내를 같이 찍는다).
+2. **카메라 인덱스** — 맥은 순서가 Windows 와 다르고 내장 FaceTime 카메라도 인덱스 하나를 차지한다.
+   C920 두 대를 꽂고 `python tools/list_cameras.py` → `logs/camshot/idx*.png` 를 보고 `config/host.yaml` 의
+   `cameras.indices` 를 맞춘다(2026-08-28 실측: 외장이 먼저 [0][1], FaceTime 이 [2]). **C920 없이 실기 모드로 띄우면
+   0번 = FaceTime 이 열린다.**
+3. **초점** — 맥에서는 OpenCV 로 C920 초점을 고정할 수 없다. 초점이 움직이면 `calib/*.npz` 와 어긋나 위치가 수 cm 틀린다.
+   카메라 쪽 유틸리티로 초점을 고정해 두거나, 정확도가 중요한 날은 Windows 에서 돌린다.
+4. **모델** — Geti 배포 폴더를 `models/geti_deployment`, 손 모델을 `models/hand_landmarker.task` 에 둔다(저장소 밖).
+5. **Claude 키** — `~/.zshrc` 에 `export ANTHROPIC_API_KEY=<키>` 를 넣고 터미널을 새로 연다.
+
+실행 명령은 아래 "실행"과 같다(`python` 은 venv 안의 3.11).
+
+맥에서 알아 둘 것:
+
+- 기동할 때 `objc[...]: Class AVFFrameReceiver is implemented in both ... cv2 ... av ...` 경고가 뜰 수 있다.
+  OpenCV 와 PyAV(faster-whisper 의존)가 같은 FFmpeg 장치 라이브러리를 각자 들고 와서 나는 경고다. 카메라는 OpenCV 자체
+  AVFoundation 경로로 열고 PyAV 의 장치 입력은 쓰지 않으므로 동작에는 영향이 없다(2026-10-20 시뮬 · 검출기 · UI 확인).
+- `../ros2_ws/src/vla_common/test` 중 `test_arm_units` · `test_config` 일부는 Pi 설정(`vla_robot_bringup/config`)을
+  읽는다 — 이 저장소에는 Host 만 있으므로 실패한다. 규약 테스트(`test_protocol.py`)는 돈다.
+
 ## 준비물
 
 - **카메라 캘리브레이션**: `calib/cam0.npz`, `calib/cam1.npz` (기존 `hardware/grippers_topview/calib` 에서 복사해 둠).

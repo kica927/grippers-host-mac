@@ -46,13 +46,30 @@ def _browser_candidates() -> list[str]:
         rel = [r"Google\Chrome\Application\chrome.exe", r"Microsoft\Edge\Application\msedge.exe"]
         return [str(Path(r) / p) for p in rel for r in roots if r]
     if sys.platform == "darwin":
-        return ["/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-                "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge"]
+        rel = ["Google Chrome.app/Contents/MacOS/Google Chrome",
+               "Microsoft Edge.app/Contents/MacOS/Microsoft Edge"]
+        return [str(root / p) for p in rel for root in (Path("/Applications"), Path.home() / "Applications")]
     return [shutil.which(n) or "" for n in ("google-chrome", "chromium", "chromium-browser", "microsoft-edge")]
 
 
 def _profile_dir() -> Path:
+    if sys.platform == "darwin":
+        return Path.home() / "Library" / "Caches" / "vla_robot_ui" / "profile"
     return Path(os.environ.get("LOCALAPPDATA") or Path.home() / ".cache") / "vla_robot_ui" / "profile"
+
+
+#: 맥 주 화면의 작업 영역(메뉴 막대·Dock 제외) 높이, pt. 크롬 --window-size 도 pt 다(배율 무관).
+_MAC_WORKAREA_JXA = 'ObjC.import("AppKit"); $.NSScreen.mainScreen.visibleFrame.size.height'
+
+
+def _mac_workarea_height() -> Optional[int]:
+    """2026-10-20 맥북(13인치): 작업 영역 770 pt — 고정 860 이면 창 아래가 잘린다."""
+    try:
+        out = subprocess.run(["osascript", "-l", "JavaScript", "-e", _MAC_WORKAREA_JXA],
+                             capture_output=True, text=True, timeout=5).stdout.strip()
+        return int(float(out)) if out else None
+    except Exception:  # noqa: BLE001 — 못 재면 원래 크기
+        return None
 
 
 def close_app_windows() -> int:
@@ -75,7 +92,7 @@ def close_app_windows() -> int:
 
 def window_geometry(height: int = 0) -> tuple[int, int, int, int]:
     """(너비, 높이, x, y) — 화면 배율 반영(크롬 --window-size 는 배율 적용 뒤 크기다).
-    height=0 이면 화면 작업 영역(작업 표시줄 제외)에 맞춘다. 2026-10-05: 125 % 배율 노트북에서 860 높이가
+    height=0 이면 화면 작업 영역(작업 표시줄 · 맥은 메뉴 막대와 Dock 제외)에 맞춘다. 2026-10-05: 125 % 배율 노트북에서 860 높이가
     작업 영역 816 을 넘어 아래가 잘렸다.
     비율은 팀원 run-windows.bat(460 x 860)에서 스테이지를 476 으로 넓힌 만큼 폭만 늘렸다(10-05, Map 버튼)."""
     w0, h0, margin = 504, 860, 24      # 스테이지 476 x 768 + 창 여백(팀원 원본 432 -> 460 과 같은 28 px)
@@ -90,6 +107,8 @@ def window_geometry(height: int = 0) -> tuple[int, int, int, int]:
             avail = int((r.bottom - r.top) / scale)
         except Exception:  # noqa: BLE001 — 못 재면 원래 크기
             avail = None
+    elif sys.platform == "darwin" and not height:
+        avail = _mac_workarea_height()
     h = height or (min(h0, avail - 2 * margin) if avail else h0)
     h = max(int(h), 480)
     return round(h * w0 / h0), h, 80, margin

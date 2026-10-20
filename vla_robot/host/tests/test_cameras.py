@@ -80,3 +80,40 @@ def test_parse_focus():
 
 def test_config_default_matches_the_team_values(cfg):
     assert cfg.cameras.focus == {0: 5, 1: 0}
+
+
+def test_backend_per_platform(monkeypatch):
+    """DSHOW 는 Windows 전용 — 맥에서 쓰면 예외 없이 isOpened() 만 False 다."""
+    monkeypatch.setattr(cameras.sys, "platform", "win32")
+    assert cameras.capture_backend() == cv2.CAP_DSHOW
+    monkeypatch.setattr(cameras.sys, "platform", "darwin")
+    monkeypatch.setattr(cameras, "IS_MACOS", True)
+    assert cameras.capture_backend() == cv2.CAP_AVFOUNDATION
+
+
+class RefusingCap(FakeCap):
+    """AVFoundation 처럼 초점 속성을 받지 않는(set -> False) 가짜."""
+
+    def set(self, prop, value):
+        super().set(prop, value)
+        return prop not in (cv2.CAP_PROP_AUTOFOCUS, cv2.CAP_PROP_FOCUS)
+
+
+def test_mac_says_focus_cannot_be_locked(monkeypatch, capsys):
+    monkeypatch.setattr(cameras, "IS_MACOS", True)
+    monkeypatch.setattr(cameras.cv2, "VideoCapture", RefusingCap)
+    cameras.open_cams([0], 1280, 720, {0: 5})
+    out = capsys.readouterr().out
+    assert "초점 고정을 받지 않습니다" in out
+    assert "로 읽힌다" not in out               # 되읽기 판정의 엉뚱한 말이 아니라 원인을 말한다
+
+
+def test_mac_unopened_camera_mentions_permission(monkeypatch, capsys):
+    class Closed(FakeCap):
+        def isOpened(self):
+            return False
+
+    monkeypatch.setattr(cameras, "IS_MACOS", True)
+    monkeypatch.setattr(cameras.cv2, "VideoCapture", Closed)
+    cameras.open_cams([0], 1280, 720, None)
+    assert "카메라 권한" in capsys.readouterr().out

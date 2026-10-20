@@ -105,8 +105,12 @@ def test_two_hands_stay_two(cfg):
                        [[_sighting_at(K0, R0, t0, *left), _sighting_at(K0, R0, t0, *right)],
                         [_sighting_at(K1, R1, t1, *right), _sighting_at(K1, R1, t1, *left)]],
                        cfg.hands)
-    got = sorted((round(p.x, 2), round(p.y, 2)) for p in pts)
-    assert got == [(0.07, 0.92), (1.9, 0.92)] or got == [(0.08, 0.92), (1.9, 0.92)]
+    # 반올림 비교는 0.075 · 0.915 같은 경계값에서 부동소수 잡음에 따라 0.91/0.92 로 갈린다
+    # (같은 코드가 맥 OpenCV 4.14 · 5.0 에서 서로 다른 쪽으로 떨어졌다) — 거리로 본다.
+    got = sorted((p.x, p.y) for p in pts)
+    assert len(got) == 2
+    for (gx, gy), (ex, ey, _z) in zip(got, (left, right), strict=True):
+        assert abs(gx - ex) < 0.01 and abs(gy - ey) < 0.01
     assert all(p.cams == "cam0+cam1" for p in pts)
 
 
